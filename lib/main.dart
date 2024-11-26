@@ -142,51 +142,53 @@ class _CameraScreenState extends State<CameraScreen> {
     final width = image.width;
     final height = image.height;
 
-    final yPlane = image.planes[0];
-    final uPlane = image.planes.length > 1 ? image.planes[1] : null;
-    final vPlane = image.planes.length > 2 ? image.planes[2] : null;
+    if (Platform.isAndroid && image.format.group == ImageFormatGroup.nv21) {
+      // Handle NV21 format (Android)
+      final yPlane = image.planes[0];
+      final uPlane = image.planes.length > 1 ? image.planes[1] : null;
+      final vPlane = image.planes.length > 2 ? image.planes[2] : null;
 
-    final imgBuffer = Uint8List(width * height * 3);
+      final imgBuffer = Uint8List(width * height * 3);
 
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final yValue = yPlane.bytes[y * yPlane.bytesPerRow + x];
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          // Get Y value
+          final yValue = yPlane.bytes[y * yPlane.bytesPerRow + x];
 
-        int uValue = 128; // Default chroma U
-        int vValue = 128; // Default chroma V
+          int uValue = 128; // Default chroma U
+          int vValue = 128; // Default chroma V
 
-        if (uPlane != null && vPlane != null) {
-          // Separate U and V planes (YUV420 format)
-          final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x ~/ 2);
-          if (uvIndex < uPlane.bytes.length && uvIndex < vPlane.bytes.length) {
-            uValue = uPlane.bytes[uvIndex];
-            vValue = vPlane.bytes[uvIndex];
+          if (uPlane != null && vPlane != null) {
+            // NV21 format: U and V are interleaved
+            final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x & ~1); // x & ~1 ensures even index
+            if (uvIndex + 1 < uPlane.bytes.length) {
+              vValue = uPlane.bytes[uvIndex];
+              uValue = uPlane.bytes[uvIndex + 1];
+            }
           }
-        } else if (uPlane != null && image.format.group == ImageFormatGroup.nv21) {
-          // Interleaved UV plane (NV21 format)
-          final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x & ~1); // x & ~1 ensures even index
-          if (uvIndex + 1 < uPlane.bytes.length) {
-            vValue = uPlane.bytes[uvIndex];
-            uValue = uPlane.bytes[uvIndex + 1];
-          }
+
+          // Convert YUV to RGB using standard conversion formula
+          final r = (yValue + 1.402 * (vValue - 128)).clamp(0, 255).toInt();
+          final g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255).toInt();
+          final b = (yValue + 1.772 * (uValue - 128)).clamp(0, 255).toInt();
+
+          // Write RGB values to buffer
+          final pixelIndex = (y * width + x) * 3;
+          imgBuffer[pixelIndex] = r;
+          imgBuffer[pixelIndex + 1] = g;
+          imgBuffer[pixelIndex + 2] = b;
         }
-
-        // Convert YUV to RGB using standard conversion formula
-        final r = (yValue + 1.402 * (vValue - 128)).clamp(0, 255).toInt();
-        final g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255).toInt();
-        final b = (yValue + 1.772 * (uValue - 128)).clamp(0, 255).toInt();
-
-        // Write RGB values to buffer
-        final pixelIndex = (y * width + x) * 3;
-        imgBuffer[pixelIndex] = r;
-        imgBuffer[pixelIndex + 1] = g;
-        imgBuffer[pixelIndex + 2] = b;
       }
+
+      return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
+    } else if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
+      // No conversion needed for iOS, BGRA8888 format
+      final imgBuffer = image.planes[0].bytes;
+      return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
+    } else {
+      throw Exception('Unsupported image format or platform');
     }
-
-    return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
   }
-
 
 
 
