@@ -5,8 +5,10 @@ import 'package:camera/camera.dart';
 import 'package:ffmpeg_kit_flutter_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_min_gpl/return_code.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:video_player/video_player.dart';
 
 List<CameraDescription>? cameras;
 
@@ -39,6 +41,7 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isProcessingFrame = false;
   int _frameSkipCount = 0;
   String? _recordedVideoPath;
+  int _frameCount = 0; // Declare at the class level
 
   @override
   void initState() {
@@ -56,55 +59,121 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _initializeCamera() async {
     _cameraController = CameraController(
       cameras!.first,
-      ResolutionPreset.medium,
+      ResolutionPreset.high,
       enableAudio: false, // Disable audio for simplicity
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.nv21 // for Android
+          : ImageFormatGroup.bgra8888, // for iOS
     );
     await _cameraController.initialize();
+    // Set flash mode to off
+    await _cameraController.setFlashMode(FlashMode.off);
+    await _cameraController.lockCaptureOrientation(DeviceOrientation.portraitUp);
     if (mounted) setState(() {});
     _cameraController.startImageStream(_processCameraFrame);
   }
 
   Future<void> _processCameraFrame(CameraImage image) async {
     _frameSkipCount++;
-    if (_frameSkipCount % 3 != 0 || _isProcessingFrame) return;
+    if (_frameSkipCount % 3 != 0 || _isProcessingFrame) return; // Adjust %3 to control processing frequency
 
     _isProcessingFrame = true;
 
     try {
+      // Step 1: Pose Detection
       final inputImage = await _convertCameraImageToInputImage(image);
       if (inputImage != null) {
         final poses = await _poseDetector.processImage(inputImage);
-
         setState(() {
-          _detectedPoses = poses;
+          _detectedPoses = poses; // Update detected poses
         });
       }
+
+      // Step 2: Save Frame to Disk
+      final tempDir = await getTemporaryDirectory();
+      final framesDir = Directory('${tempDir.path}/pose_detection/frames');
+
+      if (!framesDir.existsSync()) {
+        framesDir.createSync(recursive: true);
+      }
+
+
+      final framePath = '${framesDir.path}/frame_${_frameCount.toString().padLeft(3,"0")}.jpg';
+
+      // Convert CameraImage to JPEG
+      final bytes = _convertYUV420ToImage(image);
+      if (bytes != null) {
+        await File(framePath).writeAsBytes(bytes);
+        _frameCount++; // Increment after writing to file
+        log('Saved frame to: $framePath');
+      }
+
     } catch (e) {
-      print('Error processing frame: $e');
+      print('Error processing camera frame: $e');
     } finally {
       _isProcessingFrame = false;
     }
   }
 
+
+  Uint8List? _convertYUV420ToImage(CameraImage image) {
+    try {
+      if (Platform.isAndroid) {
+        // YUV420 format on Android
+        return _convertYUV420ToJPEG(
+          image.planes[0].bytes,
+          image.planes[1].bytes,
+          image.planes[2].bytes,
+          image.planes[0].bytesPerRow,
+          image.planes[1].bytesPerRow,
+          image.width,
+          image.height,
+        );
+      } else {
+        // BGRA8888 format on iOS
+        final bytes = image.planes[0].bytes;
+        return Uint8List.fromList(bytes);
+      }
+    } catch (e) {
+      print('Error converting image: $e');
+      return null;
+    }
+  }
+
+// Example function for YUV420 conversion (modify for your needs)
+  Uint8List _convertYUV420ToJPEG(
+      Uint8List yPlane,
+      Uint8List uPlane,
+      Uint8List vPlane,
+      int yRowStride,
+      int uvRowStride,
+      int width,
+      int height,
+      ) {
+    // You can use libraries like `image` or implement custom YUV to RGB conversion
+    throw UnimplementedError('YUV420 conversion logic needs to be implemented.');
+  }
+
+
   Future<InputImage?> _convertCameraImageToInputImage(CameraImage image) async {
     try {
-      if (Platform.isAndroid && image.format.raw != 35) {
-        print('Unsupported image format: ${image.format.raw}');
-        return null;
-      }
+
 
       final bytes = _concatenatePlanes(image.planes);
       if (bytes == null) return null;
+      final imageRotation = InputImageRotationValue.fromRawValue(cameras![0].sensorOrientation)
+          ?? InputImageRotation.rotation0deg; // Default to 0deg if null
 
-      final rotation = InputImageRotation.rotation90deg; // Adjust as needed
+      final inputImageFormat = InputImageFormatValue.fromRawValue(image.format.raw);
 
       return InputImage.fromBytes(
         bytes: bytes,
         metadata: InputImageMetadata(
           size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: InputImageFormat.nv21,
+          rotation: imageRotation!,
+          format: inputImageFormat!,
           bytesPerRow: image.planes[0].bytesPerRow,
+
         ),
       );
     } catch (e) {
@@ -133,77 +202,75 @@ class _CameraScreenState extends State<CameraScreen> {
       _isRecording = true;
     });
 
-    // Use the cache directory for temporary storage
     final tempDir = await getTemporaryDirectory();
     final framesDir = Directory('${tempDir.path}/pose_detection/frames');
     final videoFilePath = '${tempDir.path}/pose_detection/recorded_video.mp4';
 
-    // Ensure frames directory exists
-    if (!framesDir.existsSync()) {
-      framesDir.createSync(recursive: true);
-    }
-
-    final stopwatch = Stopwatch()..start(); // Start a timer
-
     try {
-      print("Recording frames...");
-      int frameCount = 0;
-
-      while (stopwatch.elapsed.inSeconds < 10) {
-        // Take a picture
-        final image = await _cameraController.takePicture();
-        final framePath = '${framesDir.path}/frame_${frameCount.toString().padLeft(3, '0')}.jpg';
-        File(image.path).copySync(framePath);
-
-        print('Saved frame: $framePath'); // Debugging frame saving
-        frameCount++;
+      // Step 1: Ensure frames are being saved
+      if (!framesDir.existsSync() || framesDir.listSync().isEmpty) {
+        throw Exception('No frames available for video generation.');
       }
 
-      stopwatch.stop(); // Stop the timer
-
-      // Debugging: Check saved frames
       final frameFiles = framesDir.listSync();
-      print('Frames found: ${frameFiles.map((e) => e.path).join(", ")}');
+      log('Frames available for FFmpeg: ${frameFiles.map((file) => file.path).toList()}');
+      log('Frames available for FFmpeg Length: ${frameFiles.map((file) => file.path).toList().length}');
 
-      print("Combining frames into a video...");
 
-      // FFmpeg command with better quality settings
+      // Step 2: Create video using FFmpeg
       final ffmpegCommand = [
-        '-framerate', '4', // Match 30 FPS
-        '-i', '${framesDir.path}/frame_%03d.jpg', // Input frame sequence
-        '-c:v', 'libx264', // Use H.264 codec
-        '-crf', '18', // Constant Rate Factor (lower = better quality; range: 0-51)
-        '-preset', 'slow', // Slow preset for better compression efficiency
-        '-pix_fmt', 'yuv420p', // Standard pixel format for compatibility
-        '-b:v', '2M', // Set bitrate to 2 Mbps
+        '-framerate', '4', // Adjust the framerate as needed
+        '-i', '${framesDir.path}/frame_%03d.jpg',
+        '-c:v', 'libx264',
+        '-crf', '18', // Quality setting
+        '-preset', 'slow',
+        '-pix_fmt', 'yuv420p',
+        '-b:v', '2M', // Video bitrate
         videoFilePath
       ].join(' ');
-
+      log('Executing FFmpeg command: $ffmpegCommand');
       await FFmpegKit.executeAsync(ffmpegCommand, (session) async {
         final returnCode = await session.getReturnCode();
-        final output = await session.getOutput();
-        final logs = await session.getLogsAsString();
+        final logs = await session.getAllLogsAsString();
+
         if (ReturnCode.isSuccess(returnCode)) {
-          print('Video saved successfully at: $videoFilePath');
           setState(() {
             _recordedVideoPath = videoFilePath;
           });
+
+          // Navigate to the video preview screen
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => VideoPreviewScreen(videoPath: videoFilePath),
+            ),
+          );
         } else {
-          log('FFmpeg Command: $ffmpegCommand');
-          log('FFmpeg Output Path: $videoFilePath');
+          log('FFmpeg failed with return code: $returnCode');
           log('FFmpeg logs: $logs');
-          log('FFmpegKit failed with return code: $returnCode');
-          log('FFmpeg error output: $output');
         }
       });
     } catch (e) {
-      print('Error during recording: $e');
+      print('Error during video generation: $e');
     } finally {
+      // Cleanup and reset recording state
       setState(() {
         _isRecording = false;
       });
+
+      _cleanupFrames(); // Delete frames after video creation
     }
   }
+
+
+  void _cleanupFrames() async {
+    final tempDir = await getTemporaryDirectory();
+    final framesDir = Directory('${tempDir.path}/pose_detection/frames');
+    if (framesDir.existsSync()) {
+      framesDir.deleteSync(recursive: true);
+    }
+  }
+
 
 
 
@@ -219,23 +286,21 @@ class _CameraScreenState extends State<CameraScreen> {
         body: Center(child: CircularProgressIndicator()),
       );
     }
-
+    final imageRotation = InputImageRotationValue.fromRawValue(cameras![0].sensorOrientation);
     return Scaffold(
       appBar: AppBar(title: Text("Pose Detection and Recording")),
       body: Stack(
+        fit: StackFit.expand,
         children: [
-          Positioned.fill(
-            child: CameraPreview(_cameraController),
-          ),
-          Positioned.fill(
-            child: CustomPaint(
-              painter: PosePainter(
+          CameraPreview(_cameraController),
+
+          CustomPaint(
+            painter: PosePainter(
                 _detectedPoses,
                 _cameraController.value.previewSize!,
-                  InputImageRotation.rotation90deg
-              ),
+                imageRotation!
             ),
-          ),
+          )
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -262,6 +327,9 @@ class PosePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    log('Canvas size: ${size.width}x${size.height}');
+    log('Image size: ${absoluteImageSize.width}x${absoluteImageSize.height}');
+    log('Rotation: $rotation');
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 5.0
@@ -361,65 +429,88 @@ class PosePainter extends CustomPainter {
 }
 
 
-
-double translateX(double x, InputImageRotation rotation, Size size, Size imageSize) {
+double translateX(double x, InputImageRotation rotation, Size canvasSize, Size imageSize) {
+  // Handle iOS-specific adjustments for canvas-to-image ratio
+  final bool isIOS = Platform.isIOS;
   switch (rotation) {
     case InputImageRotation.rotation90deg:
-      return x * size.width / (Platform.isIOS ? imageSize.width : imageSize.height);
+      return x * canvasSize.width / (isIOS ? imageSize.height : imageSize.width);
     case InputImageRotation.rotation270deg:
-      return size.width - x * size.width / (Platform.isIOS ? imageSize.width : imageSize.height);
+      return canvasSize.width - x * canvasSize.width / (isIOS ? imageSize.height : imageSize.width);
     default:
-      return x * size.width / imageSize.width;
+      return x * canvasSize.width / imageSize.width;
   }
 }
 
-double translateY(double y, InputImageRotation rotation, Size size, Size imageSize) {
+double translateY(double y, InputImageRotation rotation, Size canvasSize, Size imageSize) {
+  final bool isIOS = Platform.isIOS;
   switch (rotation) {
     case InputImageRotation.rotation90deg:
     case InputImageRotation.rotation270deg:
-      return y * size.height / (Platform.isIOS ? imageSize.height : imageSize.width);
+      return y * canvasSize.height / (isIOS ? imageSize.width : imageSize.height);
     default:
-      return y * size.height / imageSize.height;
-  }
-}
-
-double translateX1({
-  required double x,
-  required Size canvasSize,
-  required Size imageSize,
-  required InputImageRotation rotation,
-  required CameraLensDirection cameraLensDirection,
-}) {
-  switch (rotation) {
-    case InputImageRotation.rotation90deg:
-      return x * canvasSize.width / (Platform.isIOS ? imageSize.width : imageSize.height);
-    case InputImageRotation.rotation270deg:
-      return canvasSize.width - x * canvasSize.width / (Platform.isIOS ? imageSize.width : imageSize.height);
-    case InputImageRotation.rotation0deg:
-    case InputImageRotation.rotation180deg:
-      switch (cameraLensDirection) {
-        case CameraLensDirection.back:
-          return x * canvasSize.width / imageSize.width;
-        default:
-          return canvasSize.width - x * canvasSize.width / imageSize.width;
-      }
-  }
-}
-
-double translateY1({
-  required double y,
-  required Size canvasSize,
-  required Size imageSize,
-  required InputImageRotation rotation,
-  required CameraLensDirection cameraLensDirection,
-}) {
-  switch (rotation) {
-    case InputImageRotation.rotation90deg:
-    case InputImageRotation.rotation270deg:
-      return y * canvasSize.height / (Platform.isIOS ? imageSize.height : imageSize.width);
-    case InputImageRotation.rotation0deg:
-    case InputImageRotation.rotation180deg:
       return y * canvasSize.height / imageSize.height;
   }
 }
 
+
+
+
+
+
+class VideoPreviewScreen extends StatefulWidget {
+  final String videoPath;
+
+  const VideoPreviewScreen({required this.videoPath});
+
+  @override
+  State<VideoPreviewScreen> createState() => _VideoPreviewScreenState();
+}
+
+class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
+  late VideoPlayerController _videoPlayerController;
+
+  @override
+  void initState() {
+    super.initState();
+    _videoPlayerController = VideoPlayerController.file(File(widget.videoPath))
+      ..initialize().then((_) {
+        setState(() {});
+        _videoPlayerController.play();
+      });
+  }
+
+  @override
+  void dispose() {
+    _videoPlayerController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Video Preview')),
+      body: Center(
+        child: _videoPlayerController.value.isInitialized
+            ? AspectRatio(
+          aspectRatio: _videoPlayerController.value.aspectRatio,
+          child: VideoPlayer(_videoPlayerController),
+        )
+            : CircularProgressIndicator(),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          if (_videoPlayerController.value.isPlaying) {
+            _videoPlayerController.pause();
+          } else {
+            _videoPlayerController.play();
+          }
+          setState(() {});
+        },
+        child: Icon(
+          _videoPlayerController.value.isPlaying ? Icons.pause : Icons.play_arrow,
+        ),
+      ),
+    );
+  }
+}
