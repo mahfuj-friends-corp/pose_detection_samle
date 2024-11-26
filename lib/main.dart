@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
+import 'package:image/image.dart' as img;
 
 List<CameraDescription>? cameras;
 
@@ -42,7 +43,7 @@ class _CameraScreenState extends State<CameraScreen> {
   int _frameSkipCount = 0;
   String? _recordedVideoPath;
   int _frameCount = 0; // Declare at the class level
-
+  int _frameSkipCount1 = 0;
   @override
   void initState() {
     super.initState();
@@ -59,7 +60,7 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _initializeCamera() async {
     _cameraController = CameraController(
       cameras!.first,
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false, // Disable audio for simplicity
       imageFormatGroup: Platform.isAndroid
           ? ImageFormatGroup.nv21 // for Android
@@ -72,6 +73,9 @@ class _CameraScreenState extends State<CameraScreen> {
     if (mounted) setState(() {});
     _cameraController.startImageStream(_processCameraFrame);
   }
+
+
+
 
   Future<void> _processCameraFrame(CameraImage image) async {
     _frameSkipCount++;
@@ -97,17 +101,22 @@ class _CameraScreenState extends State<CameraScreen> {
         framesDir.createSync(recursive: true);
       }
 
+      log('Image format group: ${image.format.group}');
+      log('Plane 0 (Y) bytes: ${image.planes[0].bytes.length}');
+      log('Plane 1 (U) bytes: ${image.planes.length > 1 ? image.planes[1].bytes.length : 'N/A'}');
+      log('Plane 2 (V) bytes: ${image.planes.length > 2 ? image.planes[2].bytes.length : 'N/A'}');
 
-      final framePath = '${framesDir.path}/frame_${_frameCount.toString().padLeft(3,"0")}.jpg';
+      final framePath = '${framesDir.path}/frame_${_frameCount.toString().padLeft(3, "0")}.jpg';
 
-      // Convert CameraImage to JPEG
-      final bytes = _convertYUV420ToImage(image);
-      if (bytes != null) {
-        await File(framePath).writeAsBytes(bytes);
-        _frameCount++; // Increment after writing to file
-        log('Saved frame to: $framePath');
-      }
+      // Convert CameraImage to JPG and save
+      final jpgBytes = await _convertCameraImageToJpg(image);
+      final file = File(framePath);
+      await file.writeAsBytes(jpgBytes);
+      print('Frame saved to: $framePath');
 
+
+
+      _frameCount++;
     } catch (e) {
       print('Error processing camera frame: $e');
     } finally {
@@ -115,44 +124,72 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-
-  Uint8List? _convertYUV420ToImage(CameraImage image) {
+  Future<Uint8List> _convertCameraImageToJpg(CameraImage image) async {
     try {
-      if (Platform.isAndroid) {
-        // YUV420 format on Android
-        return _convertYUV420ToJPEG(
-          image.planes[0].bytes,
-          image.planes[1].bytes,
-          image.planes[2].bytes,
-          image.planes[0].bytesPerRow,
-          image.planes[1].bytesPerRow,
-          image.width,
-          image.height,
-        );
-      } else {
-        // BGRA8888 format on iOS
-        final bytes = image.planes[0].bytes;
-        return Uint8List.fromList(bytes);
-      }
+      // Convert YUV420 image to RGB
+      final imgRgb = _convertYUV420ToImage(image);
+
+      // Encode RGB image to JPG
+      final jpgBytes = img.encodeJpg(imgRgb);
+      return Uint8List.fromList(jpgBytes);
     } catch (e) {
       print('Error converting image: $e');
-      return null;
+      rethrow;
     }
   }
 
-// Example function for YUV420 conversion (modify for your needs)
-  Uint8List _convertYUV420ToJPEG(
-      Uint8List yPlane,
-      Uint8List uPlane,
-      Uint8List vPlane,
-      int yRowStride,
-      int uvRowStride,
-      int width,
-      int height,
-      ) {
-    // You can use libraries like `image` or implement custom YUV to RGB conversion
-    throw UnimplementedError('YUV420 conversion logic needs to be implemented.');
+  img.Image _convertYUV420ToImage(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+
+    final yPlane = image.planes[0];
+    final uPlane = image.planes.length > 1 ? image.planes[1] : null;
+    final vPlane = image.planes.length > 2 ? image.planes[2] : null;
+
+    final imgBuffer = Uint8List(width * height * 3);
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        final yValue = yPlane.bytes[y * yPlane.bytesPerRow + x];
+
+        int uValue = 128; // Default chroma U
+        int vValue = 128; // Default chroma V
+
+        if (uPlane != null && vPlane != null) {
+          // Separate U and V planes (YUV420 format)
+          final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x ~/ 2);
+          if (uvIndex < uPlane.bytes.length && uvIndex < vPlane.bytes.length) {
+            uValue = uPlane.bytes[uvIndex];
+            vValue = vPlane.bytes[uvIndex];
+          }
+        } else if (uPlane != null && image.format.group == ImageFormatGroup.nv21) {
+          // Interleaved UV plane (NV21 format)
+          final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x & ~1); // x & ~1 ensures even index
+          if (uvIndex + 1 < uPlane.bytes.length) {
+            vValue = uPlane.bytes[uvIndex];
+            uValue = uPlane.bytes[uvIndex + 1];
+          }
+        }
+
+        // Convert YUV to RGB using standard conversion formula
+        final r = (yValue + 1.402 * (vValue - 128)).clamp(0, 255).toInt();
+        final g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255).toInt();
+        final b = (yValue + 1.772 * (uValue - 128)).clamp(0, 255).toInt();
+
+        // Write RGB values to buffer
+        final pixelIndex = (y * width + x) * 3;
+        imgBuffer[pixelIndex] = r;
+        imgBuffer[pixelIndex + 1] = g;
+        imgBuffer[pixelIndex + 2] = b;
+      }
+    }
+
+    return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
   }
+
+
+
+
 
 
   Future<InputImage?> _convertCameraImageToInputImage(CameraImage image) async {
@@ -258,18 +295,18 @@ class _CameraScreenState extends State<CameraScreen> {
         _isRecording = false;
       });
 
-      _cleanupFrames(); // Delete frames after video creation
+     // _cleanupFrames(); // Delete frames after video creation
     }
   }
 
 
-  void _cleanupFrames() async {
-    final tempDir = await getTemporaryDirectory();
-    final framesDir = Directory('${tempDir.path}/pose_detection/frames');
-    if (framesDir.existsSync()) {
-      framesDir.deleteSync(recursive: true);
-    }
-  }
+  // void _cleanupFrames() async {
+  //   final tempDir = await getTemporaryDirectory();
+  //   final framesDir = Directory('${tempDir.path}/pose_detection/frames');
+  //   if (framesDir.existsSync()) {
+  //     framesDir.deleteSync(recursive: true);
+  //   }
+  // }
 
 
 
@@ -430,29 +467,27 @@ class PosePainter extends CustomPainter {
 
 
 double translateX(double x, InputImageRotation rotation, Size canvasSize, Size imageSize) {
-  // Handle iOS-specific adjustments for canvas-to-image ratio
-  final bool isIOS = Platform.isIOS;
+
   switch (rotation) {
     case InputImageRotation.rotation90deg:
-      return x * canvasSize.width / (isIOS ? imageSize.height : imageSize.width);
+      return x * (canvasSize.width) /imageSize.height;
     case InputImageRotation.rotation270deg:
-      return canvasSize.width - x * canvasSize.width / (isIOS ? imageSize.height : imageSize.width);
+      return canvasSize.width - x * canvasSize.width /  imageSize.height;
     default:
       return x * canvasSize.width / imageSize.width;
   }
 }
 
 double translateY(double y, InputImageRotation rotation, Size canvasSize, Size imageSize) {
-  final bool isIOS = Platform.isIOS;
+
   switch (rotation) {
     case InputImageRotation.rotation90deg:
     case InputImageRotation.rotation270deg:
-      return y * canvasSize.height / (isIOS ? imageSize.width : imageSize.height);
+      return y * canvasSize.height /  imageSize.width ;
     default:
       return y * canvasSize.height / imageSize.height;
   }
 }
-
 
 
 
