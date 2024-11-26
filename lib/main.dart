@@ -182,13 +182,29 @@ class _CameraScreenState extends State<CameraScreen> {
 
       return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
     } else if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
-      // No conversion needed for iOS, BGRA8888 format
+      // Correct handling for BGRA8888 (iOS)
       final imgBuffer = image.planes[0].bytes;
-      return img.Image.fromBytes(width: width, height: height, bytes: imgBuffer.buffer);
+
+      // Create an empty RGB buffer for the `image` package
+      final rgbBuffer = Uint8List(width * height * 3);
+
+      for (int i = 0; i < width * height; i++) {
+        final b = imgBuffer[i * 4];     // Blue
+        final g = imgBuffer[i * 4 + 1]; // Green
+        final r = imgBuffer[i * 4 + 2]; // Red
+        // Ignore Alpha (imgBuffer[i * 4 + 3])
+
+        rgbBuffer[i * 3] = r;
+        rgbBuffer[i * 3 + 1] = g;
+        rgbBuffer[i * 3 + 2] = b;
+      }
+
+      return img.Image.fromBytes(width: width, height: height, bytes: rgbBuffer.buffer);
     } else {
       throw Exception('Unsupported image format or platform');
     }
   }
+
 
 
 
