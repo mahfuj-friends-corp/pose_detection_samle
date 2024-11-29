@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:ffmpeg_kit_flutter_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_min_gpl/return_code.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
@@ -128,22 +130,12 @@ class _CameraScreenState extends State<CameraScreen> {
 
 
 
-
-
-
-
-
-
-
-
   Future<Uint8List> _convertCameraImageToJpg(CameraImage image) async {
     try {
-      // Convert YUV420 image to RGB
-      final imgRgb = _convertYUV420ToImage(image);
-
-      // Encode RGB image to JPG
-      final jpgBytes = img.encodeJpg(imgRgb);
-      return Uint8List.fromList(jpgBytes);
+      // Use an isolate to process the image
+      final isolateData = IsolateData(image, Platform.isAndroid);
+      final Uint8List jpgBytes = await compute(_processImageInIsolate, isolateData);
+      return jpgBytes;
     } catch (e) {
       print('Error converting image: $e');
       rethrow;
@@ -152,6 +144,17 @@ class _CameraScreenState extends State<CameraScreen> {
 
 
 
+// The function to run in the isolate
+  Uint8List _processImageInIsolate(IsolateData data) {
+    final image = data.image;
+
+    // Convert YUV420 or BGRA8888 to RGB
+    final img.Image rgbImage = _convertYUV420ToImage(image);
+
+    // Encode RGB image to JPG
+    final jpgBytes = img.encodeJpg(rgbImage);
+    return Uint8List.fromList(jpgBytes);
+  }
 
   static img.Image _convertYUV420ToImage(CameraImage image) {
     final width = image.width;
@@ -187,7 +190,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ((g >> 2) & 0xff00) >> 8, (b >> 10) & 0xff, 255);
         }
       }
-      return _rotateImage(outImg,cameras![0].sensorOrientation);
+      return _rotateImage(outImg, cameras![0].sensorOrientation);
     } else if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
       final imgBuffer = image.planes[0].bytes;
       final rgbBuffer = Uint8List(width * height * 3);
@@ -210,6 +213,84 @@ class _CameraScreenState extends State<CameraScreen> {
       throw Exception('Unsupported platform or image format.');
     }
   }
+
+
+
+
+  // Future<Uint8List> _convertCameraImageToJpg(CameraImage image) async {
+  //   try {
+  //     // Convert YUV420 image to RGB
+  //     final imgRgb = _convertYUV420ToImage(image);
+  //
+  //     // Encode RGB image to JPG
+  //     final jpgBytes = img.encodeJpg(imgRgb);
+  //     return Uint8List.fromList(jpgBytes);
+  //   } catch (e) {
+  //     print('Error converting image: $e');
+  //     rethrow;
+  //   }
+  // }
+  //
+  //
+  //
+  //
+  // static img.Image _convertYUV420ToImage(CameraImage image) {
+  //   final width = image.width;
+  //   final height = image.height;
+  //
+  //   if (Platform.isAndroid && image.format.group == ImageFormatGroup.nv21) {
+  //     Uint8List yuv420sp = image.planes[0].bytes;
+  //     final outImg = img.Image(height: height, width: width);
+  //     final int frameSize = width * height;
+  //
+  //     for (int j = 0, yp = 0; j < height; j++) {
+  //       int uvp = frameSize + (j >> 1) * width, u = 0, v = 0;
+  //       for (int i = 0; i < width; i++, yp++) {
+  //         int y = (0xff & yuv420sp[yp]) - 16;
+  //         if (y < 0) y = 0;
+  //         if ((i & 1) == 0) {
+  //           v = (0xff & yuv420sp[uvp++]) - 128;
+  //           u = (0xff & yuv420sp[uvp++]) - 128;
+  //         }
+  //         int y1192 = 1192 * y;
+  //         int r = (y1192 + 1634 * v);
+  //         int g = (y1192 - 833 * v - 400 * u);
+  //         int b = (y1192 + 2066 * u);
+  //
+  //         if (r < 0) r = 0;
+  //         else if (r > 262143) r = 262143;
+  //         if (g < 0) g = 0;
+  //         else if (g > 262143) g = 262143;
+  //         if (b < 0) b = 0;
+  //         else if (b > 262143) b = 262143;
+  //
+  //         outImg.setPixelRgba(i, j, ((r << 6) & 0xff0000) >> 16,
+  //             ((g >> 2) & 0xff00) >> 8, (b >> 10) & 0xff, 255);
+  //       }
+  //     }
+  //     return _rotateImage(outImg,cameras![0].sensorOrientation);
+  //   } else if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
+  //     final imgBuffer = image.planes[0].bytes;
+  //     final rgbBuffer = Uint8List(width * height * 3);
+  //
+  //     for (int i = 0; i < width * height; i++) {
+  //       final b = imgBuffer[i * 4];     // Blue
+  //       final g = imgBuffer[i * 4 + 1]; // Green
+  //       final r = imgBuffer[i * 4 + 2]; // Red
+  //       rgbBuffer[i * 3] = r;
+  //       rgbBuffer[i * 3 + 1] = g;
+  //       rgbBuffer[i * 3 + 2] = b;
+  //     }
+  //
+  //     return img.Image.fromBytes(
+  //       width: width,
+  //       height: height,
+  //       bytes: rgbBuffer.buffer,
+  //     );
+  //   } else {
+  //     throw Exception('Unsupported platform or image format.');
+  //   }
+  // }
 
 
   static img.Image _rotateImage(img.Image inputImage, int rotation) {
@@ -625,3 +706,9 @@ class SaveFrameArgs {
   SaveFrameArgs(this.frameBytes, this.framePath);
 }
 
+class IsolateData {
+  final CameraImage image;
+  final bool isAndroid;
+
+  IsolateData(this.image, this.isAndroid);
+}
