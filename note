@@ -1,0 +1,36 @@
+        // Step 2: Save Frame to Disk
+        // final tempDir = await getTemporaryDirectory();
+        // final framesDir = Directory('${tempDir.path}/pose_detection/frames');
+        //
+        // if (!framesDir.existsSync()) {
+        //   framesDir.createSync(recursive: true);
+        // }
+        //
+        // log('Image format group: ${image.format.group}');
+        // log('Plane 0 (Y) bytes: ${image.planes[0].bytes.length}');
+        // log('Plane 1 (U) bytes: ${image.planes.length > 1 ? image.planes[1]
+        //     .bytes.length : 'N/A'}');
+        // log('Plane 2 (V) bytes: ${image.planes.length > 2 ? image.planes[2]
+        //     .bytes.length : 'N/A'}');
+        //
+        // final framePath = '${framesDir.path}/frame_${_frameCount.toString()
+        //     .padLeft(3, "0")}.jpg';
+        //
+        //
+        // final jpgBytes = await _convertCameraImageToJpg(image);
+        // _saveFrameToDisk(SaveFrameArgs(jpgBytes, framePath));
+
+
+
+
+
+
+
+
+          void _cleanupFrames() async {
+            final tempDir = await getTemporaryDirectory();
+            final framesDir = Directory('${tempDir.path}/pose_detection/frames');
+            if (framesDir.existsSync()) {
+              framesDir.deleteSync(recursive: true);
+            }
+          }
