@@ -42,7 +42,7 @@ dependencies:
   video_player: ^2.9.2
   google_mlkit_commons: ^0.7.1
   image: ^4.3.0
-  plugin_platform_interface: ^2.1.8
+  flutter_isolate: ^2.1.0
 
 
 
